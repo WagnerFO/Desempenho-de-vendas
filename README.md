@@ -1,7 +1,7 @@
 # Project Model Canvas — Kaggle Chatbot MVP (Desempenho de vendas por tipo de loja)
 
 ## Contexto
-O naufrágio do Titanic em 1912 resultou em uma das bases de dados mais conhecidas em ciência de dados.  
+
 O dataset contém informações sobre passageiros (idade, sexo, classe, tarifa, etc.).  
 O objetivo educacional é usar esse conjunto como exemplo para treinar modelos simples e construir um chatbot interativo.
 
