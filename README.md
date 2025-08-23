@@ -2,25 +2,28 @@
 
 ## Contexto
 
-O dataset contém informações sobre passageiros (idade, sexo, classe, tarifa, etc.).  
-O objetivo educacional é usar esse conjunto como exemplo para treinar modelos simples e construir um chatbot interativo.
+Grandes redes varejistas têm diferentes tipos de loja.
+##O dataset contém informações sobre passageiros (idade, sexo, classe, tarifa, etc.).  
+##O objetivo educacional é usar esse conjunto como exemplo para treinar modelos simples e construir um chatbot interativo.
 
 ---
 
 ## Problema a ser Respondido
-Qual perfil de loja mais vende e por quais razões?
+UQual perfil de loja mais vende e por quais razões?
 
 ---
 
 ## Pergunta Norteadora
-- Quais características mais impactaram na sobrevivência (idade, sexo, classe, tarifa)?  
-- É possível treinar um modelo de aprendizado de máquina simples que faça boas previsões?  
+Um item tem alta ou baixa visibilidade dependendo do tipo de loja?
+
+-- Quais características mais impactaram na sobrevivência (idade, sexo, classe, tarifa)?  
+-- É possível treinar um modelo de aprendizado de máquina simples que faça boas previsões?  
 
 ---
 
 ## Solução Proposta
 Desenvolver um **chatbot educacional em Streamlit** que:  
-1. Permita upload do arquivo `train.csv` do Titanic.  
+1. Permita upload do arquivo `train.csv` do BigMart Sales Data.  
 2. Treine modelos de:
    - Regressão logística (classificação da sobrevivência).  
    - Regressão linear (predição da tarifa).  
