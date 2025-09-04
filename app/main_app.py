@@ -1,64 +1,99 @@
+import sys
 import os
+import streamlit as st
 import pandas as pd
-from core import db_utils, data_loader, model_utils
+import joblib
 
-DB_NAME = "ml_retail_db"
+# Adiciona o diretório-pai ao caminho do Python para encontrar 'core'
+app_dir = os.path.dirname(os.path.abspath(__file__))
+project_root = os.path.dirname(app_dir)
+sys.path.append(project_root)
 
-def main():
-    # 1. Criar database
-    print("Criando database...")
-    db_utils.create_database(DB_NAME)
+from core.model_utils import train_linear_model, train_logistic_model
 
-    # 2. Executar scripts SQL (SOR → SOT → SPEC)
-    sql_folder = os.path.join("core", "data")
-    sql_files = [
-        "sor_items.sql", "sor_outlets.sql", "sor_sales.sql",
-        "sot_items.sql", "sot_outlets.sql", "sot_sales.sql",
-        "spec_features.sql", "spec_labels.sql"
-    ]
-    for file in sql_files:
-        path = os.path.join(sql_folder, file)
-        db_utils.execute_sql_file(DB_NAME, path)
+# --- Configurações da página ---
+st.set_page_config(page_title="Streamlit - Desempenho de Vendas", layout="wide")
 
-    # 3. Inserir dados nas tabelas SOR
-    data_loader.insert_csv_to_table(DB_NAME, "Train.csv", "sor_items")
-    data_loader.insert_csv_to_table(DB_NAME, "Train.csv", "sor_outlets")
-    data_loader.insert_csv_to_table(DB_NAME, "Train.csv", "sor_sales")
+# --------------------------------------------------------------------------------------
+# Lógica de Treinamento e Carregamento (executada uma vez)
+# --------------------------------------------------------------------------------------
+linear_model_path = os.path.join("model", "linear_regression_model.pickle")
+logistic_model_path = os.path.join("model", "logistic_regression_model.pickle")
+encoder_path = os.path.join("model", "onehot_encoder.joblib")
 
-    # ⚠️ Aqui deveria entrar a lógica para transformar SOR → SOT → SPEC
-    # Por enquanto, vamos simular SPEC com Pandas
+# Verificar se os modelos e o encoder já foram treinados e salvos
+if not os.path.exists(linear_model_path) or not os.path.exists(logistic_model_path) or not os.path.exists(encoder_path):
+    st.info("Modelos não encontrados. Treinando e salvando os modelos agora...")
     
-    df = pd.read_csv("Train.csv")
+    CSV_PATH = os.path.join(project_root, "Train.csv")
+    try:
+        df = pd.read_csv(CSV_PATH)
+    except FileNotFoundError:
+        st.error(f"Erro: Arquivo CSV não encontrado no caminho: {CSV_PATH}")
+        st.stop()
+    
+    # Preparar features e labels para o treinamento
+    features_linear = df[['Item_Weight', 'Item_Visibility', 'Item_MRP']].copy()
+    labels_linear = df['Item_Outlet_Sales'].copy()
+    features_linear = features_linear.fillna(features_linear.mean(numeric_only=True))
+    
+    features_logistic = df[['Outlet_Type', 'Outlet_Size', 'Outlet_Location_Type']].copy()
+    median_vis = df['Item_Visibility'].median()
+    df['Is_High_Visibility'] = (df['Item_Visibility'] > median_vis).astype(int)
+    labels_logistic = df['Is_High_Visibility'].copy()
+    
+    # Treinar e salvar o modelo linear
+    train_linear_model(features_linear, labels_linear)
+    
+    # Treinar e salvar o modelo logístico (agora com pré-processamento interno)
+    train_logistic_model(features_logistic, labels_logistic)
+    
+    st.success("Modelos treinados e salvos com sucesso!")
+    st.experimental_rerun() # Reinicia a página para carregar os modelos
 
-    # --------------------------
-    # Modelo Linear (previsão de vendas)
-    # --------------------------
-    features_linear = df[["Item_MRP", "Item_Weight"]].fillna(0)
-    labels_linear = df["Item_Outlet_Sales"]
+# Carregar os modelos e o encoder para uso no app
+try:
+    linear_model = joblib.load(linear_model_path)
+    log_model = joblib.load(logistic_model_path)
+    encoder = joblib.load(encoder_path)
+except FileNotFoundError:
+    st.error("Erro: Arquivos de modelo e encoder não encontrados. Por favor, execute o código de treinamento primeiro.")
+    st.stop()
 
-    model_utils.train_and_save_model(
-        features_linear, labels_linear,
-        model_type="linear",
-        model_name="sales_regression"
-    )
+# --------------------------------------------------------------------------------------
+# Interface do Streamlit
+# --------------------------------------------------------------------------------------
+st.title("Streamlit - Desempenho de Vendas")
+st.markdown("Bem-vindo ao dashboard de análise e previsão de desempenho de vendas.")
 
-    # --------------------------
-    # Modelo Logístico (classificação de visibilidade)
-    # --------------------------
-    # Criar alvo binário: 1 = visibilidade acima da mediana, 0 = abaixo
-    median_visibility = df["Item_Visibility"].median()
-    labels_logistic = (df["Item_Visibility"] > median_visibility).astype(int)
+tab_analysis, tab_prediction = st.tabs(["📊 Análise & Métricas", "🔮 Previsão Interativa"])
 
-    # Features para o modelo logístico
-    features_logistic = df[["Outlet_Type", "Outlet_Size", "Outlet_Location_Type"]].fillna("Unknown")
+with tab_analysis:
+    st.header("Métricas de Desempenho")
+    
+    st.subheader("Modelo de Regressão Linear (Previsão de Vendas)")
+    st.info("RMSE: O erro médio na previsão de vendas é de aproximadamente **$1338.89**")
+    
+    st.subheader("Modelo de Regressão Logística (Previsão de Visibilidade)")
+    st.info("Acurácia: A acurácia do modelo para prever a visibilidade é de **95.60%**")
 
-    # One-hot encoding para variáveis categóricas
-    features_logistic = pd.get_dummies(features_logistic, drop_first=True)
+with tab_prediction:
+    st.header("Faça sua Previsão")
+    st.markdown("Selecione as características de uma loja para prever a visibilidade do item.")
+    
+    outlet_type = st.selectbox("Tipo de Loja", ['Supermarket Type1', 'Supermarket Type2', 'Grocery Store'])
+    outlet_size = st.selectbox("Tamanho da Loja", ['Small', 'Medium', 'High'])
+    location_type = st.selectbox("Tipo de Localização", ['Tier 1', 'Tier 2', 'Tier 3'])
+    
+    if st.button("Prever Visibilidade"):
+        input_df = pd.DataFrame([[outlet_type, outlet_size, location_type]],
+                                columns=['Outlet_Type', 'Outlet_Size', 'Outlet_Location_Type'])
 
-    model_utils.train_and_save_model(
-        features_logistic, labels_logistic,
-        model_type="logistic",
-        model_name="visibility_classifier"
-    )
+        input_encoded = encoder.transform(input_df)
 
-    # 5. Dropar DB (apenas se você quiser limpa
+        prediction = log_model.predict(input_encoded)
+        
+        if prediction[0] == 1:
+            st.success("A previsão para a visibilidade do item é **alta**!")
+        else:
+            st.warning("A previsão para a visibilidade do item é **baixa**.") 

@@ -1,37 +1,43 @@
 # Arquitetura de Software — Kaggle Chatbot MVP (BigMart Sales)
 
-> Este documento descreve a arquitetura lógica, a organização em camadas e o fluxo de dados do MVP, além de instruções detalhadas para desenhar o diagrama no **draw\.io** (diagrams.net) e exportar para o repositório.
+> Documento atualizado para refletir o uso de camadas **SOR, SOT, SPEC** com MySQL e o salvamento de modelos em `.pickle`.
 
 ---
 
 ## 1. Objetivos de Arquitetura
 
-* **Separação de responsabilidades**: UI (Streamlit) isolada da lógica de negócio (`core/`) e dos artefatos (`data/`).
-* **Simplicidade (MVP)**: poucos componentes, baixo acoplamento e convenções claras.
-* **Reprodutibilidade**: pipelines de ML encapsulados; execução determinística.
-* **Evolução**: fácil trocar o dataset Kaggle, incluir novos modelos ou expandir análises.
-* **Governança**: espaço próprio para configs (`configs/`) e documentação (`docs/`).
+* **Separação de responsabilidades**: UI (Streamlit) isolada da lógica (`core/`) e dos dados (`SOR/SOT/SPEC`).
+* **Governança de dados**: dados brutos preservados em **SOR**, tratados em **SOT** e especializados em **SPEC**.
+* **Reprodutibilidade**: tabelas SQL versionadas em `core/data/`.
+* **Evolução**: fácil trocar dataset Kaggle, adicionar novos modelos ou expandir análises.
+* **Portabilidade**: modelos treinados salvos em `.pickle`.
 
 ---
 
 ## 2. Visão em Camadas
 
 ```
+
 Usuário (navegador)
-   ↓
-[ app/ ]  → Streamlit UI
-   ↓
-[ core/ ]
-   ├─ data/       → leitura/validação de CSV BigMart
-   ├─ features/   → pipelines de preprocessamento
-   ├─ models/     → treino, avaliação, predição
-   ├─ explain/    → coeficientes/importâncias
-   └─ chatbot/    → regras de resposta sobre vendas e visibilidade
-   ↓
-[ data/ ]
-   ├─ raw/        → dados brutos
-   ├─ processed/  → dados tratados
-   └─ models/     → artefatos .pkl
+↓
+\[ app/ ]  → Streamlit UI
+↓
+\[ core/ ]
+├─ db\_utils.py     → criação/drop DB, execução SQL
+├─ data\_loader.py  → carga CSV → SOR
+├─ model\_utils.py  → treino e salvamento dos modelos
+└─ data/           → scripts .sql (SOR, SOT, SPEC)
+↓
+\[ MySQL Database ]
+├─ SOR   → tabelas brutas (espelho CSV)
+├─ SOT   → tabelas tratadas (imputação, padronização)
+└─ SPEC  → tabelas finais (features + labels para ML)
+↓
+\[ ML Models ]
+├─ Regressão Linear → previsão de vendas
+├─ Regressão Logística → classificação de visibilidade
+└─ Arquivos salvos em /model/\*.pickle
+
 ```
 
 ---
@@ -39,97 +45,70 @@ Usuário (navegador)
 ## 3. Componentes e Responsabilidades
 
 ### app/
-
-* Camada de apresentação (UI em Streamlit).
+* Camada de apresentação (Streamlit).
 * Upload do dataset BigMart.
-* Escolha da tarefa (regressão ou classificação).
-* Exibição de métricas, gráficos de vendas, importâncias e respostas do chatbot.
+* Seleção de tarefa (regressão ou classificação).
+* Exibição de métricas, gráficos e respostas do chatbot.
+
+### core/db_utils.py
+* Criar e dropar o banco MySQL.
+* Executar arquivos `.sql` de `core/data`.
+
+### core/data_loader.py
+* Inserir dados do CSV (`Train.csv`) nas tabelas SOR.
+* Preparar transformações para SOT e SPEC.
+
+### core/model_utils.py
+* Treinar modelos:
+  * **LinearRegression** → prever `Item_Outlet_Sales`.
+  * **LogisticRegression** → prever visibilidade (alta/baixa).
+* Avaliar rapidamente (RMSE, acurácia).
+* Salvar modelos em `.pickle` na pasta `model/`.
 
 ### core/data/
+* Scripts `.sql` separados por camada e tabela:
+  * `sor_*.sql` → tabelas brutas.
+  * `sot_*.sql` → tabelas tratadas.
+  * `spec_*.sql` → tabelas finais para treino.
 
-* Funções de I/O para CSVs BigMart.
-* Validação de schema (colunas obrigatórias: tipo de loja, visibilidade do item, vendas, etc.).
+### MySQL (camada de dados)
+* **SOR** → cópia bruta do CSV.  
+* **SOT** → dados limpos (sem nulos, categorias padronizadas).  
+* **SPEC** → features e labels prontos para treino.  
 
-### core/features/
-
-* Pipelines de preprocessamento: imputação de valores faltantes, one-hot encoding, escala.
-* Seleção de features relevantes para vendas e visibilidade.
-
-### core/models/
-
-* Treinamento de modelos:
-
-  * **Regressão Linear** → previsão de vendas.
-  * **Regressão Logística** → classificação da visibilidade do item (alta/baixa).
-* Avaliação:
-
-  * Regressão → RMSE, R².
-  * Classificação → acurácia, f1-score, precisão, recall.
-
-### core/explain/
-
-* Extração de coeficientes e importâncias de variáveis.
-* Interpretação sobre **quais fatores impactam vendas e visibilidade** (ex.: tipo de loja, tamanho, localização).
-
-### core/chatbot/
-
-* Regras para perguntas frequentes:
-
-  * “Qual tipo de loja mais vende?”
-  * “A visibilidade influencia mais em supermercados ou lojas pequenas?”
-* Respostas sobre métricas, variáveis e pipeline.
-
-### data/
-
-* `raw/`: datasets brutos (não alterar).
-* `processed/`: datasets tratados.
-* `models/`: modelos salvos (.pkl).
-
-### configs/
-
-* Arquivos de configuração (paths, parâmetros de treino, logging).
-
-### docs/
-
-* Documentação integrada: PMC, arquitetura, modelagem de dados, governança LGPD, testes, deploy.
+### model/
+* Artefatos finais salvos como `.pickle`.
 
 ---
 
 ## 4. Fluxo de Execução
 
-1. Usuário acessa aplicação pelo navegador.
-2. Faz upload do dataset **BigMart Sales**.
-3. A camada `app/` envia os dados para `core/data/` → validação.
-4. `core/features/` monta o pipeline de preprocessamento.
-5. `core/models/` treina e avalia o modelo escolhido.
-6. `core/explain/` gera coeficientes, gráficos e importâncias.
-7. `core/chatbot/` interpreta perguntas e gera respostas sobre vendas e visibilidade.
-8. Resultados (métricas, gráficos, tabelas, explicações) são exibidos em `app/`.
-9. Artefatos (datasets tratados, modelos) são salvos em `data/`.
+1. Usuário acessa a aplicação pelo navegador.  
+2. Upload do dataset **BigMart Sales**.  
+3. `app/` envia CSV para `core/data_loader`.  
+4. Dados inseridos em **SOR** no MySQL.  
+5. `db_utils` aplica scripts para transformar SOR → SOT → SPEC.  
+6. `model_utils` lê SPEC e treina modelos:
+   - Linear → prever vendas.  
+   - Logístico → classificar visibilidade.  
+7. Modelos são salvos em `/model/*.pickle`.  
+8. `app/` exibe métricas, gráficos e chatbot com respostas baseadas nos modelos.  
+9. Ao final, o DB pode ser **dropado** para liberar espaço.  
 
 ---
 
-## 5. Como desenhar no draw\.io
+## 5. Como desenhar no draw.io
 
-1. Acesse [draw.io](https://app.diagrams.net/).
-2. Crie caixas para cada camada:
-
-   * **Usuário (Navegador)** no topo.
-   * **app/** logo abaixo, identificado como “Streamlit UI”.
-   * **core/** ao centro, subdividido em: data, features, models, explain, chatbot.
-   * **data/** na base, com subpastas raw, processed, models.
-   * **configs/** e **docs/** ao lado, conectados como apoio.
-3. Conecte com setas verticais (usuário → app → core → data).
-4. Adicione rótulos nas setas, por exemplo: “upload dataset BigMart”, “pré-processamento”, “treino/predição”, “resultados de vendas”.
-5. Salve o diagrama em formato `.drawio` e exporte também como `.png`.
-6. No repositório, coloque em `docs/images/architecture.png` e referencie neste arquivo com:
-
-```markdown
-![Arquitetura](./images/architecture.png)
-```
-
----
-
-Essa arquitetura é suficiente para um **MVP educacional BigMart**, mas já prepara terreno para futuras extensões (ex.: outros algoritmos de ML, integração com APIs externas de estoque, dashboards avançados).
+1. Caixa **Usuário (Navegador)** no topo.  
+2. Abaixo, caixa **app/** (Streamlit).  
+3. Caixa **core/** subdividida em:
+   - db_utils
+   - data_loader
+   - model_utils
+   - data (SQL scripts)
+4. Caixa **MySQL Database** com três sub-blocos: SOR, SOT, SPEC.  
+5. Caixa **ML Models** à direita, conectada ao SPEC.  
+6. Fluxo: Usuário → app → core → DB (SOR → SOT → SPEC) → ML Models → app.  
+7. Salvar `.drawio` e exportar `.png` em `docs/images/architecture.png`.
 
 ---
