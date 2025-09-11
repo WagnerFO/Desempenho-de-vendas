@@ -1,59 +1,37 @@
+from sklearn.preprocessing import OneHotEncoder
+from sklearn.linear_model import LinearRegression, LogisticRegression
+import joblib
 import pickle
 import os
-import pandas as pd
-from sklearn.linear_model import LinearRegression, LogisticRegression
-from sklearn.model_selection import train_test_split
-from sklearn.metrics import mean_squared_error, accuracy_score
-import numpy as np
-from sklearn.preprocessing import OneHotEncoder
-import joblib
 
-# Função para treinar o modelo de Regressão Linear
-def train_linear_model(features: pd.DataFrame, labels: pd.Series):
-    """
-    Treina e salva um modelo de Regressão Linear para previsão de vendas.
-    """
+MODEL_DIR = os.path.join(os.path.dirname(__file__), "..", "model")
+os.makedirs(MODEL_DIR, exist_ok=True)
+
+def train_linear_model(X, y):
     model = LinearRegression()
-    X_train, X_test, y_train, y_test = train_test_split(features, labels, test_size=0.2, random_state=42)
-    model.fit(X_train, y_train)
-    preds = model.predict(X_test)
-    score = np.sqrt(mean_squared_error(y_test, preds)) # RMSE
-    print(f"[Linear Regression] RMSE: {score:.2f}")
-    os.makedirs("model", exist_ok=True)
-    model_path = os.path.join("model", "linear_regression_model.pickle")
-    with open(model_path, "wb") as f:
+    model.fit(X, y)
+    with open(os.path.join(MODEL_DIR, "linear_regression_model.pickle"), "wb") as f:
         pickle.dump(model, f)
+    print("✅ Linear Regression salvo em model/")
     return model
 
-# Função para treinar o modelo de Regressão Logística
-def train_logistic_model(features: pd.DataFrame, labels: pd.Series):
-    """
-    Treina e salva um modelo de Regressão Logística para classificação.
-    Também salva o encoder de dados categóricos.
-    """
-    # Pré-processamento: One-Hot Encoding
-    try:
-        encoder = OneHotEncoder(drop='first', sparse_output=False, handle_unknown='ignore')
-    except TypeError:
-        encoder = OneHotEncoder(drop='first', sparse=False, handle_unknown='ignore')
-    
-    X_encoded = encoder.fit_transform(features)
-    
-    # Treinamento do modelo
+def train_logistic_model(X, y):
+    import inspect
+    # Verifica se a versão do sklearn tem o parâmetro 'sparse_output'
+    if "sparse_output" in inspect.signature(OneHotEncoder).parameters:
+        encoder = OneHotEncoder(drop="first", sparse_output=False, handle_unknown="ignore")  # sklearn >= 1.2
+    else:
+        encoder = OneHotEncoder(drop="first", sparse=False, handle_unknown="ignore")  # sklearn < 1.2
+
+    X_encoded = encoder.fit_transform(X)
     model = LogisticRegression(max_iter=1000)
-    X_train, X_test, y_train, y_test = train_test_split(X_encoded, labels, test_size=0.2, random_state=42)
-    model.fit(X_train, y_train)
-    
-    # Avaliação do modelo
-    preds = model.predict(X_test)
-    score = accuracy_score(y_test, preds)
-    print(f"[Logistic Regression] Accuracy: {score:.2%}")
-    
-    # Salvar o modelo e o encoder
-    os.makedirs("model", exist_ok=True)
-    model_path = os.path.join("model", "logistic_regression_model.pickle")
-    joblib.dump(model, model_path)
-    encoder_path = os.path.join("model", "onehot_encoder.joblib")
-    joblib.dump(encoder, encoder_path)
-    
+    model.fit(X_encoded, y)
+
+    # salvar modelo e encoder
+    with open(os.path.join(MODEL_DIR, "logistic_regression_model.pickle"), "wb") as f:
+        pickle.dump(model, f)
+    joblib.dump(encoder, os.path.join(MODEL_DIR, "onehot_encoder.joblib"))
+
+    print("✅ Logistic Regression e encoder salvos em model/")
     return model
+

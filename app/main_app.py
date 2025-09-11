@@ -58,10 +58,19 @@ def load_or_train_models():
         st.success("✅ Modelos treinados e salvos com sucesso!")
         st.experimental_rerun()
 
-    linear_model = joblib.load(linear_model_path)
-    log_model = joblib.load(logistic_model_path)
+    # --- carregar os modelos salvos ---
+    import pickle
+    with open(linear_model_path, "rb") as f:
+        linear_model = pickle.load(f)
+
+    with open(logistic_model_path, "rb") as f:
+        log_model = pickle.load(f)
+
     encoder = joblib.load(encoder_path)
+
     return linear_model, log_model, encoder
+
+
 
 def calcular_metricas(df, linear_model, log_model, encoder):
     if "Is_High_Visibility" not in df.columns:
