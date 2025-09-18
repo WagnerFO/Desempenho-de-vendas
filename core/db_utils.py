@@ -1,42 +1,62 @@
-import mysql.connector
+# core/db_utils.py
 import os
+from sqlalchemy import create_engine, text, inspect
 
-# 1. Criar conexão
-def get_connection(database=None):
-    return mysql.connector.connect(
-        host="localhost",
-        user="root",
-        password="sua_senha_aqui",
-        database=database
-    )
+# --------------------------
+# Configurações do banco
+# --------------------------
+DB_FOLDER = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "database")
+os.makedirs(DB_FOLDER, exist_ok=True)
 
-# 2. Criar database
-def create_database(db_name):
-    conn = get_connection()
-    cursor = conn.cursor()
-    cursor.execute(f"CREATE DATABASE IF NOT EXISTS {db_name}")
-    conn.commit()
-    cursor.close()
-    conn.close()
+def get_db_path(db_name: str) -> str:
+    """Retorna o caminho completo do arquivo SQLite"""
+    return os.path.join(DB_FOLDER, f"{db_name}.db")
 
-# 3. Dropar database
-def drop_database(db_name):
-    conn = get_connection()
-    cursor = conn.cursor()
-    cursor.execute(f"DROP DATABASE IF EXISTS {db_name}")
-    conn.commit()
-    cursor.close()
-    conn.close()
+def get_engine(db_name: str):
+    """Retorna um SQLAlchemy Engine para o banco SQLite"""
+    db_path = get_db_path(db_name)
+    engine = create_engine(f"sqlite:///{db_path}", echo=False, future=True)
+    return engine
 
+# --------------------------
+# 1. Criar database
+# --------------------------
+def create_database(db_name: str):
+    """Cria o arquivo de banco SQLite se não existir"""
+    db_path = get_db_path(db_name)
+    if not os.path.exists(db_path):
+        open(db_path, "w").close()  # cria arquivo vazio
+
+# --------------------------
+# 2. Dropar database
+# --------------------------
+def drop_database(db_name: str):
+    """Deleta o arquivo do banco SQLite"""
+    db_path = get_db_path(db_name)
+    if os.path.exists(db_path):
+        os.remove(db_path)
+
+# --------------------------
+# 3. Verificar se tabela existe
+# --------------------------
+def table_exists(engine, table_name: str) -> bool:
+    """Verifica se uma tabela existe no banco"""
+    inspector = inspect(engine)
+    return inspector.has_table(table_name)
+
+# --------------------------
 # 4. Executar arquivos SQL
-def execute_sql_file(db_name, file_path):
-    conn = get_connection(db_name)
-    cursor = conn.cursor()
+# --------------------------
+def execute_sql_file(engine, file_path: str):
+    """
+    Executa um arquivo .sql inteiro no banco SQLite através do SQLAlchemy.
+    """
     with open(file_path, "r", encoding="utf-8") as f:
         sql_commands = f.read()
-    for stmt in sql_commands.split(";"):
-        if stmt.strip():
-            cursor.execute(stmt)
-    conn.commit()
-    cursor.close()
-    conn.close()
+
+    commands = [cmd.strip() for cmd in sql_commands.split(";") if cmd.strip()]
+
+    with engine.connect() as conn:
+        for cmd in commands:
+            conn.execute(text(cmd))
+        conn.commit()
