@@ -6,8 +6,9 @@ matplotlib
 seaborn
 plotly
 sqlalchemy
-setup_mysql
 joblib
 jupyter
 pymysql
 cryptography
+openai
+python-dotenv
