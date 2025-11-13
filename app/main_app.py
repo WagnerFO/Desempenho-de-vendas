@@ -2,220 +2,241 @@ import os
 import sys
 import streamlit as st
 import pandas as pd
+import numpy as np
 import pickle
 import joblib
-import numpy as np
-from sklearn.metrics import mean_squared_error, accuracy_score
-from sqlalchemy import create_engine, inspect
+import plotly.express as px
+import plotly.figure_factory as ff
+from sklearn.metrics import mean_squared_error, accuracy_score, confusion_matrix, classification_report
+from sklearn.impute import SimpleImputer
+from dotenv import load_dotenv
+from openai import OpenAI
+import json
+import warnings
+warnings.filterwarnings("ignore")
 
-# --------------------------
-# Garantir que o Streamlit encontre o pacote core
-# --------------------------
+# --------------------------------------------------
+# Configuração inicial
+# --------------------------------------------------
+st.set_page_config(page_title="IA de Desempenho de Vendas", layout="wide")
+st.title("📊 IA de Desempenho de Vendas — CSV apenas")
+
 project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if project_root not in sys.path:
     sys.path.append(project_root)
 
-from core.model_utils import train_linear_model, train_logistic_model
-from core.db_utils import execute_sql_file  # função para executar arquivos .sql
-
-# --------------------------
-# Configuração de caminhos
-# --------------------------
 MODEL_DIR = os.path.join(project_root, "model")
-DATA_DIR = os.path.join(project_root, "core", "data")
-CSV_PATH = os.path.join(project_root, "Train.csv")
+os.makedirs(MODEL_DIR, exist_ok=True)
 
 LINEAR_MODEL_PATH = os.path.join(MODEL_DIR, "linear_regression_model.pickle")
 LOGISTIC_MODEL_PATH = os.path.join(MODEL_DIR, "logistic_regression_model.pickle")
 ENCODER_PATH = os.path.join(MODEL_DIR, "onehot_encoder.joblib")
 
-# --------------------------
-# Configuração do banco SQLite
-# --------------------------
-DB_PATH = os.path.join(project_root, "BigMarkSales.db")
-ENGINE_URL = f"sqlite:///{DB_PATH}"
-engine = create_engine(ENGINE_URL, echo=False)
+# --------------------------------------------------
+# OpenAI
+# --------------------------------------------------
+load_dotenv()
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
-# --------------------------
-# Funções auxiliares
-# --------------------------
-def ensure_tables_and_populate():
-    """Cria tabelas se não existirem e popula com dados do CSV"""
-    inspector = inspect(engine)
-    sql_files = {
-        "spec_features_linear": os.path.join(DATA_DIR, "spec_features_linear.sql"),
-        "spec_features_logistic": os.path.join(DATA_DIR, "spec_features_logistic.sql"),
-        "spec_labels_linear": os.path.join(DATA_DIR, "spec_labels_linear.sql"),
-        "spec_labels_logistic": os.path.join(DATA_DIR, "spec_labels_logistic.sql"),
-    }
+# --------------------------------------------------
+# Sidebar
+# --------------------------------------------------
+st.sidebar.header("📁 Importar Dados e Treinar")
+uploaded_file = st.sidebar.file_uploader("Envie um arquivo CSV", type=["csv"])
+retrain_btn = st.sidebar.button("🔁 Treinar modelo")
 
-    df_csv = pd.read_csv(CSV_PATH)
+st.sidebar.header("🤖 Configuração GPT")
+gpt_model_choice = st.sidebar.selectbox("Modelo GPT", ["gpt-4o-mini", "gpt-4o"], index=0)
+context_max_chars = st.sidebar.slider("Limite de contexto (caracteres)", 500, 20000, 4000, step=500)
 
-    # Criação das tabelas e inserção de dados
-    for table_name, sql_file in sql_files.items():
-        if not inspector.has_table(table_name):
-            # Cria a tabela vazia a partir do .sql
-            execute_sql_file(engine, sql_file)
-            st.info(f"Tabela {table_name} criada a partir de {sql_file}")
+train_status = st.sidebar.empty()
 
-        # Inserir dados do CSV
-        if table_name == "spec_features_linear":
-            df_insert = df_csv[['Item_Weight', 'Item_Visibility', 'Item_MRP']].fillna(df_csv.mean(numeric_only=True))
-        elif table_name == "spec_features_logistic":
-            df_insert = df_csv[['Outlet_Type', 'Outlet_Size', 'Outlet_Location_Type']].fillna("Unknown")
-        elif table_name == "spec_labels_linear":
-            df_insert = df_csv[['Item_Outlet_Sales']]
-        elif table_name == "spec_labels_logistic":
-            median_vis = df_csv['Item_Visibility'].median()
-            df_insert = pd.DataFrame({'Is_High_Visibility': (df_csv['Item_Visibility'] > median_vis).astype(int)})
+# --------------------------------------------------
+# Importar funções do core
+# --------------------------------------------------
+from core.model_utils import train_linear_model, train_logistic_model
 
-        # Inserir dados no banco
-        df_insert.to_sql(table_name, con=engine, if_exists="replace", index=False)
-        st.info(f"Tabela {table_name} populada com {len(df_insert)} linhas")
+def load_or_train_models(csv_path=None, retrain=False):
+    if not csv_path:
+        raise ValueError("Nenhum arquivo CSV enviado.")
 
+    df = pd.read_csv(csv_path)
 
+    # Verificar se a coluna de vendas existe
+    sales_col = None
+    for col in df.columns:
+        if "sales" in col.lower() or "vendas" in col.lower():
+            sales_col = col
+            break
+    if not sales_col:
+        raise ValueError("Nenhuma coluna relacionada a 'Sales' ou 'Vendas' foi encontrada.")
 
-def load_table(table_name):
-    """Carrega uma tabela SQL para um DataFrame"""
-    return pd.read_sql_table(table_name, engine)
+    # Tratar valores ausentes
+    df = df.copy()
+    num_cols = df.select_dtypes(include=[np.number]).columns
+    cat_cols = df.select_dtypes(include=["object"]).columns
 
+    if len(num_cols) > 0:
+        imputer_num = SimpleImputer(strategy="mean")
+        df[num_cols] = imputer_num.fit_transform(df[num_cols])
 
-def load_or_train_models(train=False):
-    """Carrega ou treina os modelos e garante que tabelas existam"""
-    ensure_tables_and_populate()
+    if len(cat_cols) > 0:
+        imputer_cat = SimpleImputer(strategy="most_frequent")
+        df[cat_cols] = imputer_cat.fit_transform(df[cat_cols])
 
+    # Modelos
+    if retrain or not (
+        os.path.exists(LINEAR_MODEL_PATH)
+        and os.path.exists(LOGISTIC_MODEL_PATH)
+        and os.path.exists(ENCODER_PATH)
+    ):
+        # Regressão Linear
+        df_linear_features = df[['Item_Weight', 'Item_Visibility', 'Item_MRP']]
+        df_linear_labels = df[sales_col]
+        train_linear_model(df_linear_features, df_linear_labels)
 
-    # Se não existir algum modelo ou solicitar treino
-    if train or not (os.path.exists(LINEAR_MODEL_PATH) and os.path.exists(LOGISTIC_MODEL_PATH) and os.path.exists(ENCODER_PATH)):
-        st.info("Treinando modelos...")
-
-        # Carregar os dados originais
-        df = pd.read_csv(CSV_PATH)
-
-        # Features e labels Linear
-        df_linear_features = df[['Item_Weight', 'Item_Visibility', 'Item_MRP']].fillna(df.mean(numeric_only=True))
-        df_linear_labels = df['Item_Outlet_Sales']
-
-        # Features e labels Logistic
+        # Regressão Logística
         median_vis = df['Item_Visibility'].median()
         df['Is_High_Visibility'] = (df['Item_Visibility'] > median_vis).astype(int)
         df_logistic_features = df[['Outlet_Type', 'Outlet_Size', 'Outlet_Location_Type']]
         df_logistic_labels = df['Is_High_Visibility']
-
-        # Treinar modelos
-        train_linear_model(df_linear_features, df_linear_labels)
         train_logistic_model(df_logistic_features, df_logistic_labels)
 
-        st.success("✅ Modelos treinados e salvos!")
-
-    # Carregar modelos salvos
     with open(LINEAR_MODEL_PATH, "rb") as f:
         linear_model = pickle.load(f)
     with open(LOGISTIC_MODEL_PATH, "rb") as f:
-        log_model = pickle.load(f)
+        logistic_model = pickle.load(f)
     encoder = joblib.load(ENCODER_PATH)
+    return linear_model, logistic_model, encoder, df, sales_col
 
-    # Carregar tabelas SQL
-    df_features_linear = load_table("spec_features_linear")
-    df_features_logistic = load_table("spec_features_logistic")
+# --------------------------------------------------
+# Calcular métricas
+# --------------------------------------------------
+def calculate_metrics(linear_model, logistic_model, encoder, df, sales_col):
+    X_lin = df[['Item_Weight', 'Item_Visibility', 'Item_MRP']]
+    y_lin = df[sales_col]
+    y_pred_lin = linear_model.predict(X_lin)
+    rmse = np.sqrt(mean_squared_error(y_lin, y_pred_lin))
 
-    return linear_model, log_model, encoder, df_features_linear, df_features_logistic
-
-
-def calcular_metricas(linear_model, log_model, encoder):
-    df = pd.read_csv(CSV_PATH)
-
-    # Regressão Linear
-    X_linear = df[['Item_Weight', 'Item_Visibility', 'Item_MRP']].fillna(df.mean(numeric_only=True))
-    y_true_linear = df['Item_Outlet_Sales']
-    y_pred_linear = linear_model.predict(X_linear)
-    rmse = np.sqrt(mean_squared_error(y_true_linear, y_pred_linear))
-
-    # Regressão Logística
     median_vis = df['Item_Visibility'].median()
     df['Is_High_Visibility'] = (df['Item_Visibility'] > median_vis).astype(int)
     X_log = df[['Outlet_Type', 'Outlet_Size', 'Outlet_Location_Type']]
-    X_log_encoded = encoder.transform(X_log)
+    X_log_enc = encoder.transform(X_log)
     y_true_log = df['Is_High_Visibility']
-    y_pred_log = log_model.predict(X_log_encoded)
-    acc = accuracy_score(y_true_log, y_pred_log) * 100
+    y_pred_log = logistic_model.predict(X_log_enc)
 
-    return rmse, acc
+    acc = accuracy_score(y_true_log, y_pred_log)
+    cm = confusion_matrix(y_true_log, y_pred_log)
+    cls_report = classification_report(y_true_log, y_pred_log, output_dict=True, zero_division=0)
 
+    tp, fn = cm[1, 1], cm[1, 0]
+    fp, tn = cm[0, 1], cm[0, 0]
+    odds_ratio = (tp * tn) / ((fp * fn) + 1e-9)
 
-# --------------------------
-# Interface Streamlit
-# --------------------------
-st.set_page_config(page_title="Desempenho de Vendas", layout="wide")
-st.title("Streamlit - Desempenho de Vendas")
-st.markdown("Dashboard para análise e previsão de desempenho de vendas.")
+    return {
+        "rmse": rmse,
+        "accuracy": acc,
+        "confusion_matrix": cm,
+        "classification_report": cls_report,
+        "odds_ratio": odds_ratio,
+        "y_true_linear": y_lin,
+        "y_pred_linear": y_pred_lin,
+    }
 
-# Treinar modelos
-if st.button("Treinar Modelos"):
-    linear_model, log_model, encoder, df_linear, df_logistic = load_or_train_models(train=True)
-else:
-    linear_model, log_model, encoder, df_linear, df_logistic = load_or_train_models(train=False)
+# --------------------------------------------------
+# Execução
+# --------------------------------------------------
+linear_model = logistic_model = encoder = metrics = None
 
-# --------------------------
-# Abas do Streamlit
-# --------------------------
-tab_analysis, tab_prediction, tab_tables = st.tabs(["📊 Métricas", "🔮 Previsão", "📋 Tabelas"])
+if retrain_btn:
+    if not uploaded_file:
+        train_status.error("❌ Nenhum arquivo CSV enviado.")
+    else:
+        save_path = os.path.join(MODEL_DIR, uploaded_file.name)
+        with open(save_path, "wb") as f:
+            f.write(uploaded_file.read())
 
-# Métricas
-with tab_analysis:
-    st.header("Métricas de Desempenho")
-    rmse, acc = calcular_metricas(linear_model, log_model, encoder)
-    st.subheader("Regressão Linear")
-    st.info(f"RMSE: {rmse:.2f}")
-    st.subheader("Regressão Logística")
-    st.info(f"Acurácia: {acc:.2f}%")
-
-# Previsão interativa
-with tab_prediction:
-    st.header("Previsão Interativa")
-
-    outlet_types = sorted(df_logistic['Outlet_Type'].dropna().unique())
-    outlet_sizes = sorted(df_logistic['Outlet_Size'].dropna().unique())
-    location_types = sorted(df_logistic['Outlet_Location_Type'].dropna().unique())
-
-    st.markdown("### 🔮 Previsão de Visibilidade")
-    outlet_type = st.selectbox("Tipo de Loja", outlet_types)
-    outlet_size = st.selectbox("Tamanho da Loja", outlet_sizes)
-    location_type = st.selectbox("Tipo de Localização", location_types)
-
-    if st.button("Prever Visibilidade"):
-        input_df = pd.DataFrame([[outlet_type, outlet_size, location_type]],
-                                columns=['Outlet_Type', 'Outlet_Size', 'Outlet_Location_Type'])
-        input_encoded = encoder.transform(input_df)
-        prediction = log_model.predict(input_encoded)
-        if prediction[0] == 1:
-            st.success("✅ Visibilidade alta")
-        else:
-            st.warning("⚠️ Visibilidade baixa")
-
-    st.markdown("---")
-    st.markdown("### 📈 Previsão de Vendas")
-    item_weight = st.number_input("Peso do Item", min_value=0.0, step=0.1)
-    item_visibility = st.number_input("Visibilidade do Item", min_value=0.0, step=0.01)
-    item_mrp = st.number_input("Preço Máximo de Varejo", min_value=0.0, step=0.1)
-
-    if st.button("Prever Vendas"):
-        input_df = pd.DataFrame([[item_weight, item_visibility, item_mrp]],
-                                columns=['Item_Weight', 'Item_Visibility', 'Item_MRP'])
-        prediction = linear_model.predict(input_df)
-        st.success(f"💰 Previsão de vendas: ${prediction[0]:.2f}")
-
-# Tabelas
-with tab_tables:
-    st.header("Verificação das Tabelas SQL")
-    tabelas = ["spec_features_linear", "spec_features_logistic", "spec_labels_linear", "spec_labels_logistic"]
-    for table_name in tabelas:
+        train_status.info("⚙️ Treinando modelos...")
         try:
-            df = pd.read_sql_table(table_name, engine)
-            st.subheader(f"Tabela: {table_name}")
-            if df.empty:
-                st.warning("⚠️ A tabela está vazia!")
-            else:
-                st.dataframe(df.head(10))  # Mostra as 10 primeiras linhas
+            linear_model, logistic_model, encoder, df, sales_col = load_or_train_models(save_path, retrain=True)
+            metrics = calculate_metrics(linear_model, logistic_model, encoder, df, sales_col)
+            train_status.success("✅ Modelos treinados com sucesso!")
         except Exception as e:
-            st.error(f"❌ Erro ao carregar a tabela {table_name}: {e}")
+            train_status.error(f"Erro ao treinar o modelo: {e}")
+
+# --------------------------------------------------
+# Exibir métricas
+# --------------------------------------------------
+if metrics:
+    st.markdown("## ✅ Métricas do Modelo")
+    c1, c2, c3 = st.columns(3)
+    c1.metric("RMSE", f"{metrics['rmse']:.2f}")
+    c2.metric("Acurácia", f"{metrics['accuracy']*100:.2f}%")
+    c3.metric("Odds Ratio", f"{metrics['odds_ratio']:.2f}")
+
+    with st.expander("📊 Detalhes do Modelo"):
+        st.write("Matriz de Confusão:")
+        st.dataframe(pd.DataFrame(metrics['confusion_matrix'], columns=["Prev:0","Prev:1"], index=["Real:0","Real:1"]))
+
+        st.write("Classification Report:")
+        st.dataframe(pd.DataFrame(metrics['classification_report']).T)
+
+    st.markdown("### 🔍 Visualização")
+    comp_df = pd.DataFrame({
+        "Vendas Reais": metrics["y_true_linear"],
+        "Vendas Previstas": metrics["y_pred_linear"]
+    })
+    fig_scatter = px.scatter(comp_df, x="Vendas Reais", y="Vendas Previstas", title="Vendas Reais vs Previstas")
+    st.plotly_chart(fig_scatter, use_container_width=True)
+else:
+    st.info("Envie um arquivo CSV e clique em **Treinar modelo** para começar.")
+
+# --------------------------------------------------
+# Chat GPT
+# --------------------------------------------------
+st.markdown("---")
+st.header("💬 Chat Inteligente")
+
+if "chat_history" not in st.session_state:
+    st.session_state.chat_history = []
+
+for msg in st.session_state.chat_history:
+    with st.chat_message(msg["role"]):
+        st.markdown(msg["content"])
+
+user_msg = st.chat_input("Escreva sua pergunta (Enter para enviar):")
+
+def call_gpt(question, metrics):
+    if not OPENAI_API_KEY:
+        return "❌ Chave OpenAI ausente."
+    client = OpenAI(api_key=OPENAI_API_KEY)
+
+    ctx = ""
+    if metrics:
+        ctx = json.dumps({
+            "RMSE": metrics["rmse"],
+            "Acurácia": metrics["accuracy"],
+            "Odds Ratio": metrics["odds_ratio"]
+        }, indent=2)
+    if len(ctx) > context_max_chars:
+        ctx = ctx[:context_max_chars] + "\n... (truncado)"
+
+    messages = [
+        {"role": "system", "content": "Você é um analista de dados especialista em desempenho de vendas."},
+        {"role": "user", "content": f"Contexto:\n{ctx}\n\nPergunta: {question}"}
+    ]
+    try:
+        response = client.chat.completions.create(
+            model=gpt_model_choice,
+            messages=messages,
+            temperature=0.3,
+        )
+        return response.choices[0].message.content.strip()
+    except Exception as e:
+        return f"Erro: {e}"
+
+if user_msg:
+    st.session_state.chat_history.append({"role": "user", "content": user_msg})
+    answer = call_gpt(user_msg, metrics)
+    st.session_state.chat_history.append({"role": "assistant", "content": answer})
+    st.rerun()
